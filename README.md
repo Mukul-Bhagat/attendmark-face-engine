@@ -18,6 +18,20 @@ Render and Docker deploys are `PORT`-aware via:
 uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8088}
 ```
 
+## Startup behavior
+
+The service now starts the HTTP server immediately and initializes InsightFace in the background (default mode).
+During model initialization, `GET /healthz` returns `503` with model state details until the engine is ready.
+
+## Low-memory tuning (Render-friendly defaults)
+
+These env vars are optional:
+
+- `FACE_MODEL_NAME` (default: `buffalo_s`)
+- `FACE_MODEL_DET_SIZE` (default: `320`)
+- `FACE_MODEL_ALLOWED_MODULES` (default: `detection,recognition`)
+- `FACE_MODEL_INIT_MODE` (default: `background`, set `lazy` for on-demand init)
+
 ## Required headers
 
 If `FACE_ENGINE_API_KEY` (or `INTERNAL_API_KEY`) is set, every `/v1/*` request must include:

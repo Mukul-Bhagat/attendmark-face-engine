@@ -36,6 +36,25 @@ LIGHTING_MAX = float(os.getenv('FACE_LIGHTING_MAX', '0.92'))
 INDEX_DIR = Path(os.getenv('FACE_INDEX_DIR', './indexes')).resolve()
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
 LOGGER = logging.getLogger('face_engine')
+FACE_MODEL_NAME = (os.getenv('FACE_MODEL_NAME', 'buffalo_s') or 'buffalo_s').strip()
+FACE_MODEL_INIT_MODE = (os.getenv('FACE_MODEL_INIT_MODE', 'background') or 'background').strip().lower()
+FACE_MODEL_ALLOWED_MODULES = [
+    module.strip()
+    for module in (os.getenv('FACE_MODEL_ALLOWED_MODULES', 'detection,recognition') or '').split(',')
+    if module.strip()
+]
+
+
+def _resolve_det_size() -> int:
+    raw = os.getenv('FACE_MODEL_DET_SIZE', '320')
+    try:
+        value = int(raw)
+    except Exception:
+        value = 320
+    return max(160, min(1024, value))
+
+
+FACE_MODEL_DET_SIZE = _resolve_det_size()
 
 
 class EnrollRequest(BaseModel):
@@ -88,30 +107,103 @@ class FaceEngine:
         self._model = None
         self._insightface_ready = False
         self._model_error: Optional[str] = None
-        self._init_model()
+        self._model_init_started = False
+        self._model_init_in_progress = False
+        self._model_initialized_at: Optional[int] = None
+        self._model_init_lock = threading.Lock()
         self._load_indexes()
+        self.ensure_model_initialized(async_init=FACE_MODEL_INIT_MODE != 'lazy')
+
+    def _set_model_failure(self, message: str) -> None:
+        with self._lock:
+            self._model = None
+            self._insightface_ready = False
+            self._model_error = message
+            self._model_initialized_at = None
+
+    def _set_model_ready(self, model) -> None:
+        with self._lock:
+            self._model = model
+            self._insightface_ready = True
+            self._model_error = None
+            self._model_initialized_at = int(time.time())
 
     def _init_model(self) -> None:
         if FaceAnalysis is None or cv2 is None:
-            self._insightface_ready = False
             if FaceAnalysis is None and cv2 is None:
-                self._model_error = 'InsightFace and OpenCV imports failed.'
+                self._set_model_failure('InsightFace and OpenCV imports failed.')
             elif FaceAnalysis is None:
-                self._model_error = 'InsightFace import failed.'
+                self._set_model_failure('InsightFace import failed.')
             else:
-                self._model_error = 'OpenCV import failed.'
+                self._set_model_failure('OpenCV import failed.')
             return
 
         try:
-            self._model = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-            self._model.prepare(ctx_id=0, det_size=(640, 640))
-            self._insightface_ready = True
-            self._model_error = None
+            kwargs = {
+                'name': FACE_MODEL_NAME,
+                'providers': ['CPUExecutionProvider'],
+            }
+            if FACE_MODEL_ALLOWED_MODULES:
+                kwargs['allowed_modules'] = FACE_MODEL_ALLOWED_MODULES
+            try:
+                model = FaceAnalysis(**kwargs)
+            except TypeError:
+                kwargs.pop('allowed_modules', None)
+                model = FaceAnalysis(**kwargs)
+
+            model.prepare(ctx_id=0, det_size=(FACE_MODEL_DET_SIZE, FACE_MODEL_DET_SIZE))
+            self._set_model_ready(model)
         except Exception as exc:
-            self._model = None
-            self._insightface_ready = False
-            self._model_error = str(exc)
+            self._set_model_failure(str(exc))
             LOGGER.exception('Failed to initialize InsightFace model')
+
+    def _init_model_worker(self) -> None:
+        try:
+            self._init_model()
+        finally:
+            with self._model_init_lock:
+                self._model_init_in_progress = False
+
+    def ensure_model_initialized(self, async_init: bool = True) -> None:
+        with self._model_init_lock:
+            if self._insightface_ready or self._model_init_in_progress:
+                return
+            self._model_init_started = True
+            self._model_init_in_progress = True
+
+        if async_init:
+            threading.Thread(
+                target=self._init_model_worker,
+                name='insightface-init',
+                daemon=True,
+            ).start()
+            return
+
+        self._init_model_worker()
+
+    def get_model_state(self) -> Dict[str, object]:
+        with self._lock:
+            if self._insightface_ready:
+                state = 'ready'
+            elif self._model_init_in_progress:
+                state = 'initializing'
+            elif self._model_error:
+                state = 'failed'
+            elif self._model_init_started:
+                state = 'starting'
+            else:
+                state = 'idle'
+
+            return {
+                'state': state,
+                'ready': self._insightface_ready,
+                'error': self._model_error,
+                'modelName': FACE_MODEL_NAME,
+                'detSize': FACE_MODEL_DET_SIZE,
+                'initMode': FACE_MODEL_INIT_MODE,
+                'initializedAt': self._model_initialized_at,
+                'allowedModules': FACE_MODEL_ALLOWED_MODULES,
+            }
 
     def _key(self, organization_id: str, class_id: str) -> str:
         return f"org_{organization_id}_class_{class_id}"
@@ -159,6 +251,7 @@ class FaceEngine:
         quality = self._compute_quality(image)
 
         if not self._insightface_ready or self._model is None:
+            self.ensure_model_initialized(async_init=True)
             return None, quality, 'ENGINE_UNAVAILABLE', 0
 
         if image is None:
@@ -466,7 +559,8 @@ def auth_guard(x_internal_api_key: Optional[str] = Header(default=None)) -> None
 @app.get('/healthz')
 def healthz(response: Response) -> dict:
     stats = engine.get_index_stats()
-    model_ready = engine._insightface_ready
+    model_state = engine.get_model_state()
+    model_ready = bool(model_state['ready'])
     healthy = model_ready and faiss is not None
 
     if not healthy:
@@ -477,7 +571,13 @@ def healthz(response: Response) -> dict:
         'version': APP_VERSION,
         'insightface': model_ready,
         'faiss': faiss is not None,
-        'modelError': engine._model_error,
+        'modelError': model_state['error'],
+        'modelState': model_state['state'],
+        'modelName': model_state['modelName'],
+        'modelDetSize': model_state['detSize'],
+        'modelInitMode': model_state['initMode'],
+        'modelAllowedModules': model_state['allowedModules'],
+        'modelInitializedAt': model_state['initializedAt'],
         'indexesDir': str(INDEX_DIR),
         'classIndexCount': stats['classIndexCount'],
         'nonEmptyClassIndexCount': stats['nonEmptyClassIndexCount'],
