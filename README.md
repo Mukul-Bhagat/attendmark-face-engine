@@ -22,6 +22,7 @@ uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8088}
 
 The service now starts the HTTP server immediately and initializes InsightFace in the background (default mode).
 During model initialization, `GET /healthz` returns `503` with model state details until the engine is ready.
+If constructor arguments are invalid (for example unsupported `allowed_modules`), startup now fails fast with an explicit model error instead of silently dropping options.
 
 ## Low-memory tuning (Render-friendly defaults)
 
@@ -31,6 +32,10 @@ These env vars are optional:
 - `FACE_MODEL_DET_SIZE` (default: `320`)
 - `FACE_MODEL_ALLOWED_MODULES` (default: `detection,recognition`)
 - `FACE_MODEL_INIT_MODE` (default: `background`, set `lazy` for on-demand init)
+- `OMP_NUM_THREADS` (recommended: `1`)
+- `OPENBLAS_NUM_THREADS` (recommended: `1`)
+- `MKL_NUM_THREADS` (recommended: `1`)
+- `NUMEXPR_NUM_THREADS` (recommended: `1`)
 
 ## Required headers
 

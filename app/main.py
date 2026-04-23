@@ -29,20 +29,49 @@ except Exception:  # pragma: no cover
 
 
 APP_VERSION = '1.0.0'
+DEFAULT_FACE_MODEL_NAME = 'buffalo_s'
+DEFAULT_FACE_MODEL_INIT_MODE = 'background'
+DEFAULT_FACE_MODEL_ALLOWED_MODULES = ['detection', 'recognition']
+VALID_FACE_MODEL_INIT_MODES = {'background', 'lazy'}
 DEFAULT_THRESHOLD = 0.72
 BLUR_MIN_VARIANCE = float(os.getenv('FACE_BLUR_MIN_VARIANCE', '60'))
 LIGHTING_MIN = float(os.getenv('FACE_LIGHTING_MIN', '0.16'))
 LIGHTING_MAX = float(os.getenv('FACE_LIGHTING_MAX', '0.92'))
 INDEX_DIR = Path(os.getenv('FACE_INDEX_DIR', './indexes')).resolve()
 INDEX_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_LEVEL = (os.getenv('LOG_LEVEL', 'INFO') or 'INFO').strip().upper()
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+)
 LOGGER = logging.getLogger('face_engine')
-FACE_MODEL_NAME = (os.getenv('FACE_MODEL_NAME', 'buffalo_s') or 'buffalo_s').strip()
-FACE_MODEL_INIT_MODE = (os.getenv('FACE_MODEL_INIT_MODE', 'background') or 'background').strip().lower()
-FACE_MODEL_ALLOWED_MODULES = [
-    module.strip()
-    for module in (os.getenv('FACE_MODEL_ALLOWED_MODULES', 'detection,recognition') or '').split(',')
-    if module.strip()
-]
+
+
+def _resolve_model_name() -> str:
+    candidate = (os.getenv('FACE_MODEL_NAME', DEFAULT_FACE_MODEL_NAME) or DEFAULT_FACE_MODEL_NAME).strip()
+    return candidate or DEFAULT_FACE_MODEL_NAME
+
+
+def _resolve_model_init_mode() -> str:
+    candidate = (os.getenv('FACE_MODEL_INIT_MODE', DEFAULT_FACE_MODEL_INIT_MODE) or DEFAULT_FACE_MODEL_INIT_MODE).strip().lower()
+    if candidate in VALID_FACE_MODEL_INIT_MODES:
+        return candidate
+    LOGGER.warning(
+        "Invalid FACE_MODEL_INIT_MODE=%s. Falling back to %s.",
+        candidate,
+        DEFAULT_FACE_MODEL_INIT_MODE,
+    )
+    return DEFAULT_FACE_MODEL_INIT_MODE
+
+
+def _resolve_allowed_modules() -> List[str]:
+    raw = os.getenv(
+        'FACE_MODEL_ALLOWED_MODULES',
+        ','.join(DEFAULT_FACE_MODEL_ALLOWED_MODULES),
+    ) or ''
+    modules = [module.strip() for module in raw.split(',') if module.strip()]
+    return modules if modules else list(DEFAULT_FACE_MODEL_ALLOWED_MODULES)
 
 
 def _resolve_det_size() -> int:
@@ -55,6 +84,9 @@ def _resolve_det_size() -> int:
 
 
 FACE_MODEL_DET_SIZE = _resolve_det_size()
+FACE_MODEL_NAME = _resolve_model_name()
+FACE_MODEL_INIT_MODE = _resolve_model_init_mode()
+FACE_MODEL_ALLOWED_MODULES = _resolve_allowed_modules()
 
 
 class EnrollRequest(BaseModel):
@@ -112,7 +144,25 @@ class FaceEngine:
         self._model_initialized_at: Optional[int] = None
         self._model_init_lock = threading.Lock()
         self._load_indexes()
+        self._log_runtime_config()
         self.ensure_model_initialized(async_init=FACE_MODEL_INIT_MODE != 'lazy')
+
+    def _log_runtime_config(self) -> None:
+        LOGGER.info(
+            (
+                "Face engine startup config: model=%s det_size=%s init_mode=%s "
+                "allowed_modules=%s index_dir=%s thread_caps={OMP=%s,OPENBLAS=%s,MKL=%s,NUMEXPR=%s}"
+            ),
+            FACE_MODEL_NAME,
+            FACE_MODEL_DET_SIZE,
+            FACE_MODEL_INIT_MODE,
+            ','.join(FACE_MODEL_ALLOWED_MODULES),
+            INDEX_DIR,
+            os.getenv('OMP_NUM_THREADS', 'unset'),
+            os.getenv('OPENBLAS_NUM_THREADS', 'unset'),
+            os.getenv('MKL_NUM_THREADS', 'unset'),
+            os.getenv('NUMEXPR_NUM_THREADS', 'unset'),
+        )
 
     def _set_model_failure(self, message: str) -> None:
         with self._lock:
@@ -145,14 +195,24 @@ class FaceEngine:
             }
             if FACE_MODEL_ALLOWED_MODULES:
                 kwargs['allowed_modules'] = FACE_MODEL_ALLOWED_MODULES
-            try:
-                model = FaceAnalysis(**kwargs)
-            except TypeError:
-                kwargs.pop('allowed_modules', None)
-                model = FaceAnalysis(**kwargs)
+            model = FaceAnalysis(**kwargs)
 
             model.prepare(ctx_id=0, det_size=(FACE_MODEL_DET_SIZE, FACE_MODEL_DET_SIZE))
             self._set_model_ready(model)
+            LOGGER.info(
+                "InsightFace model initialized successfully: model=%s det_size=%s allowed_modules=%s",
+                FACE_MODEL_NAME,
+                FACE_MODEL_DET_SIZE,
+                ','.join(FACE_MODEL_ALLOWED_MODULES),
+            )
+        except TypeError as exc:
+            self._set_model_failure(
+                (
+                    "FaceAnalysis init failed with explicit allowed_modules. "
+                    f"model={FACE_MODEL_NAME} allowed_modules={FACE_MODEL_ALLOWED_MODULES} error={exc}"
+                )
+            )
+            LOGGER.exception('Failed to initialize InsightFace model: invalid constructor arguments')
         except Exception as exc:
             self._set_model_failure(str(exc))
             LOGGER.exception('Failed to initialize InsightFace model')

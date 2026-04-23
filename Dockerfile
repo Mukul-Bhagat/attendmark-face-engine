@@ -17,6 +17,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 
 ENV FACE_INDEX_DIR=/app/indexes
+ENV PYTHONUNBUFFERED=1
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
 RUN mkdir -p /app/indexes
 
 EXPOSE 8088
