@@ -48,6 +48,40 @@ logging.basicConfig(
 LOGGER = logging.getLogger('face_engine')
 
 
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {'1', 'true', 'yes', 'on'}:
+        return True
+    if normalized in {'0', 'false', 'no', 'off'}:
+        return False
+    return default
+
+
+def _resolve_auth_key() -> Optional[str]:
+    candidate = os.getenv('FACE_ENGINE_API_KEY') or os.getenv('INTERNAL_API_KEY')
+    if not candidate:
+        return None
+    trimmed = candidate.strip()
+    return trimmed or None
+
+
+FACE_ENGINE_AUTH_REQUIRED = _parse_bool_env(
+    'FACE_ENGINE_REQUIRE_AUTH',
+    default=(os.getenv('NODE_ENV', '').strip().lower() == 'production'),
+)
+FACE_ENGINE_AUTH_KEY = _resolve_auth_key()
+if FACE_ENGINE_AUTH_REQUIRED and not FACE_ENGINE_AUTH_KEY:
+    LOGGER.error(
+        'FACE_ENGINE_REQUIRE_AUTH is enabled but FACE_ENGINE_API_KEY/INTERNAL_API_KEY is missing.',
+    )
+    raise RuntimeError(
+        'FACE_ENGINE_API_KEY or INTERNAL_API_KEY must be configured when FACE_ENGINE_REQUIRE_AUTH=true.',
+    )
+
+
 def _resolve_model_name() -> str:
     candidate = (os.getenv('FACE_MODEL_NAME', DEFAULT_FACE_MODEL_NAME) or DEFAULT_FACE_MODEL_NAME).strip()
     return candidate or DEFAULT_FACE_MODEL_NAME
@@ -151,7 +185,8 @@ class FaceEngine:
         LOGGER.info(
             (
                 "Face engine startup config: model=%s det_size=%s init_mode=%s "
-                "allowed_modules=%s index_dir=%s thread_caps={OMP=%s,OPENBLAS=%s,MKL=%s,NUMEXPR=%s}"
+                "allowed_modules=%s index_dir=%s thread_caps={OMP=%s,OPENBLAS=%s,MKL=%s,NUMEXPR=%s} "
+                "auth={required=%s,configured=%s}"
             ),
             FACE_MODEL_NAME,
             FACE_MODEL_DET_SIZE,
@@ -162,6 +197,8 @@ class FaceEngine:
             os.getenv('OPENBLAS_NUM_THREADS', 'unset'),
             os.getenv('MKL_NUM_THREADS', 'unset'),
             os.getenv('NUMEXPR_NUM_THREADS', 'unset'),
+            FACE_ENGINE_AUTH_REQUIRED,
+            FACE_ENGINE_AUTH_KEY is not None,
         )
 
     def _set_model_failure(self, message: str) -> None:
@@ -611,8 +648,12 @@ app = FastAPI(title='AttendMark Face Engine', version=APP_VERSION)
 
 
 def auth_guard(x_internal_api_key: Optional[str] = Header(default=None)) -> None:
-    expected = os.getenv('FACE_ENGINE_API_KEY') or os.getenv('INTERNAL_API_KEY')
-    if expected and x_internal_api_key != expected:
+    expected = FACE_ENGINE_AUTH_KEY
+    if not expected:
+        if FACE_ENGINE_AUTH_REQUIRED:
+            raise HTTPException(status_code=503, detail='Face engine auth is misconfigured')
+        return
+    if x_internal_api_key != expected:
         raise HTTPException(status_code=401, detail='Invalid internal API key')
 
 
@@ -625,6 +666,8 @@ def root() -> dict:
         'version': APP_VERSION,
         'modelState': model_state['state'],
         'modelReady': model_state['ready'],
+        'authRequired': FACE_ENGINE_AUTH_REQUIRED,
+        'authConfigured': FACE_ENGINE_AUTH_KEY is not None,
         'links': {
             'livez': '/livez',
             'healthz': '/healthz',
@@ -642,6 +685,8 @@ def livez() -> dict:
         'version': APP_VERSION,
         'modelState': model_state['state'],
         'modelReady': model_state['ready'],
+        'authRequired': FACE_ENGINE_AUTH_REQUIRED,
+        'authConfigured': FACE_ENGINE_AUTH_KEY is not None,
         'timestamp': int(time.time()),
     }
 
@@ -661,6 +706,8 @@ def healthz(response: Response) -> dict:
         'version': APP_VERSION,
         'insightface': model_ready,
         'faiss': faiss is not None,
+        'authRequired': FACE_ENGINE_AUTH_REQUIRED,
+        'authConfigured': FACE_ENGINE_AUTH_KEY is not None,
         'modelError': model_state['error'],
         'modelState': model_state['state'],
         'modelName': model_state['modelName'],

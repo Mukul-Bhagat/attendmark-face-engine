@@ -23,6 +23,7 @@ uvicorn app.main:app --host ${FACE_ENGINE_LISTEN_HOST:-0.0.0.0} --port ${PORT:-8
 The service now starts the HTTP server immediately and initializes InsightFace in the background (default mode).
 During model initialization, `GET /healthz` returns `503` with model state details until the engine is ready.
 If constructor arguments are invalid (for example unsupported `allowed_modules`), startup now fails fast with an explicit model error instead of silently dropping options.
+In production (`NODE_ENV=production`), auth is required by default. If `FACE_ENGINE_API_KEY` / `INTERNAL_API_KEY` is missing while auth is required, startup fails fast.
 
 `GET /livez` always returns `200` when the process is up. Use this endpoint for platform liveness checks (for example Railway deployment healthchecks), while keeping `/healthz` as the strict readiness check.
 
@@ -38,12 +39,17 @@ These env vars are optional:
 - `OPENBLAS_NUM_THREADS` (recommended: `1`)
 - `MKL_NUM_THREADS` (recommended: `1`)
 - `NUMEXPR_NUM_THREADS` (recommended: `1`)
+- `FACE_ENGINE_REQUIRE_AUTH` (`true` by default in production, otherwise optional)
 
 ## Required headers
 
-If `FACE_ENGINE_API_KEY` (or `INTERNAL_API_KEY`) is set, every `/v1/*` request must include:
+If auth is enabled (`FACE_ENGINE_REQUIRE_AUTH=true`, or production default), every `/v1/*` request must include:
 
 `x-internal-api-key: <key>`
+
+`/healthz` now reports:
+- `authRequired`
+- `authConfigured`
 
 ## Endpoints
 
@@ -67,6 +73,7 @@ If `FACE_ENGINE_API_KEY` (or `INTERNAL_API_KEY`) is set, every `/v1/*` request m
 4. Keep auth keys identical in backend and face engine:
    - backend: `INTERNAL_API_KEY` and/or `FACE_ENGINE_API_KEY`
    - face engine: `INTERNAL_API_KEY` and/or `FACE_ENGINE_API_KEY`
+   - if keys were changed, trigger a fresh Railway redeploy so runtime picks updated env.
 5. If private-network connectivity in older Railway environments is flaky, set:
    - `FACE_ENGINE_LISTEN_HOST=::`
 
