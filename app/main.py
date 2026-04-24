@@ -616,6 +616,36 @@ def auth_guard(x_internal_api_key: Optional[str] = Header(default=None)) -> None
         raise HTTPException(status_code=401, detail='Invalid internal API key')
 
 
+@app.get('/')
+def root() -> dict:
+    model_state = engine.get_model_state()
+    return {
+        'ok': True,
+        'service': 'AttendMark Face Engine',
+        'version': APP_VERSION,
+        'modelState': model_state['state'],
+        'modelReady': model_state['ready'],
+        'links': {
+            'livez': '/livez',
+            'healthz': '/healthz',
+            'docs': '/docs',
+        },
+        'timestamp': int(time.time()),
+    }
+
+
+@app.get('/livez')
+def livez() -> dict:
+    model_state = engine.get_model_state()
+    return {
+        'ok': True,
+        'version': APP_VERSION,
+        'modelState': model_state['state'],
+        'modelReady': model_state['ready'],
+        'timestamp': int(time.time()),
+    }
+
+
 @app.get('/healthz')
 def healthz(response: Response) -> dict:
     stats = engine.get_index_stats()
