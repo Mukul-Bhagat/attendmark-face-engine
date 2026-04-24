@@ -69,3 +69,17 @@ If `FACE_ENGINE_API_KEY` (or `INTERNAL_API_KEY`) is set, every `/v1/*` request m
    - face engine: `INTERNAL_API_KEY` and/or `FACE_ENGINE_API_KEY`
 5. If private-network connectivity in older Railway environments is flaky, set:
    - `FACE_ENGINE_LISTEN_HOST=::`
+
+## Production verification command
+
+From repo root:
+
+```bash
+npm run verify:prod:face-flow
+```
+
+To include protected diagnostics:
+
+```bash
+PLATFORM_OWNER_BEARER=<jwt> REQUIRE_AUTH_CHECKS=true npm run verify:prod:face-flow
+```
